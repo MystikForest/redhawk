@@ -1,4 +1,4 @@
-from .redhawk import WestmarchCalendarWeather
+from .redhawk import redhawk
 
 async def setup(bot):
-    await bot.add_cog(WestmarchCalendarWeather(bot))
+    await bot.add_cog(redhawk(bot))
