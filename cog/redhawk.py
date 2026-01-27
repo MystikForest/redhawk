@@ -253,8 +253,7 @@ def generate_weather(*, guild_id: int, ig: InGameDate, location: str = "") -> st
                 3: " The horizon looks sharp and clean.",
                 4: " Salt hangs faintly in the air.",
                 5: " Wind tugs at cloaks and canvas.",
-                6: " A pressure change hints at tomorrow.",
-            }[rng.randint(1, 6)]
+            }[rng.randint(1, 5)]
             return f"{desc}.{flavor}"
 
     return options[-1][0]
