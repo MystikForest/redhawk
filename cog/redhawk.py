@@ -432,7 +432,6 @@ class redhawk(commands.Cog):
 
         embed = discord.Embed(title="📅 Red Hawk Date", description=line)
         embed.add_field(name="Season", value=season_for_month(ig.month), inline=True)
-        embed.set_footer(text="Red Hawk Westmarch • 1 real day = 1 in-game day (UTC)")
         await ctx.send(embed=embed)
 
     @commands.command(name="weather")
@@ -459,7 +458,6 @@ class redhawk(commands.Cog):
         if loc:
             embed.add_field(name="Location", value=loc, inline=True)
         embed.add_field(name="Season", value=season_for_month(ig.month), inline=True)
-        embed.set_footer(text="Truth: deterministic per day (seeded by guild + date + location).")
         await ctx.send(embed=embed)
 
     @commands.command(name="forecast")
@@ -496,7 +494,6 @@ class redhawk(commands.Cog):
         embed = discord.Embed(title=f"🌤️ Red Hawk Forecast — Next {days} day(s)", description="\n".join(lines))
         if loc:
             embed.add_field(name="Location", value=loc, inline=True)
-        embed.set_footer(text="Confidence is based on lead time (tomorrow > later).")
         await ctx.send(embed=embed)
 
     # =============================
