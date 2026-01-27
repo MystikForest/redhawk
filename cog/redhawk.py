@@ -365,7 +365,7 @@ def forecast_weather(
 # Cog
 # =============================
 
-class WestmarchCalendarWeather(commands.Cog):
+class redhawk(commands.Cog):
     """Red Hawk: in-game calendar + weather for a Westmarch server."""
 
     def __init__(self, bot):
