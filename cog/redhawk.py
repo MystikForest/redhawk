@@ -1,32 +1,10 @@
 # westmarch_calendar_weather.py
-# Red-DiscordBot cog: Red Hawk Westmarch calendar + deterministic daily weather.
+# Red-DiscordBot cog: Red Hawk Westmarch calendar + deterministic daily weather + "usually right" forecast.
 #
-# CHANGE REQUEST APPLIED:
-# ✅ date + weather are now TOP-LEVEL COMMANDS (not subcommands)
-#   - [p]wmdate
-#   - [p]wmweather [offset]
-#   - [p]wmforecast [days]
-# Admin/settings are also top-level for consistency:
-#   - [p]wmsetepoch YYYY-MM-DD [ig_day_number]
-#   - [p]wmlocation <text>
-#   - [p]wmweekday [true/false]
-#   - [p]wmsetmonthnames name1, name2, ... (12)
-#   - [p]wmsetweekdaynames name1, ... (10)
-#   - [p]wmnamesreset
-#
-# Calendar rules (per your spec):
-# - 1 real-world day = 1 in-game day (UTC-based)
-# - 10 days in a week
-# - 3 weeks in a month => base 30-day months
-# - 365 days in a year; every 4th year has 366
-# - Extra days are added to every other month
-#
-# Interpretation:
-# - 12 months per year.
-# - Base month length = 30.
-# - Normal year: 365 = 360 + 5 extras -> months 2,4,6,8,10 are 31 days; month 12 is 30.
-# - Leap year: 366 = 360 + 6 extras -> months 2,4,6,8,10,12 are 31 days.
-# - Year 4,8,12,... are leap years.
+# UPDATE APPLIED:
+# ✅ Forecast now includes a confidence label per day: Likely / Possible / Uncertain
+# - Confidence is based on lead time (today/tomorrow higher, later lower).
+# - Forecast can still be wrong; confidence is not a guarantee.
 
 from __future__ import annotations
 
@@ -52,9 +30,9 @@ MONTHS_PER_YEAR = 12
 
 @dataclass(frozen=True)
 class InGameDate:
-    year: int   # 1-indexed
+    year: int
     month: int  # 1-12
-    day: int    # 1..month_length
+    day: int
     day_of_year: int  # 1..365/366
 
     @property
@@ -109,7 +87,7 @@ def day_number_to_ingame(day_number: int) -> InGameDate:
 
 
 # -----------------------------
-# Weather generation
+# Weather generation (truth)
 # -----------------------------
 
 def season_for_month(month: int) -> str:
@@ -218,6 +196,7 @@ def generate_weather(*, guild_id: int, ig: InGameDate, location: str = "") -> st
     options = _apply_biome_biases(WEATHER_TABLE[season], season, location)
 
     seed = _stable_seed(
+        "TRUTH",
         str(guild_id),
         f"{ig.year:04d}-{ig.month:02d}-{ig.day:02d}",
         (location or "").strip().lower(),
@@ -244,17 +223,120 @@ def generate_weather(*, guild_id: int, ig: InGameDate, location: str = "") -> st
 
 
 # -----------------------------
+# Forecast (prediction)
+# -----------------------------
+
+def _forecast_accuracy(lead_days: int) -> float:
+    # 0: 92%, 1: 86%, 2: 80%, 3: 74%, 4+: down to floor 55%
+    acc = 0.92 - (0.06 * lead_days)
+    return max(0.55, min(0.92, acc))
+
+
+def forecast_confidence_label(lead_days: int) -> str:
+    """
+    Human-facing confidence labels based on the (lead-time) accuracy curve.
+    """
+    acc = _forecast_accuracy(lead_days)
+    if acc >= 0.80:
+        return "Likely"
+    if acc >= 0.65:
+        return "Possible"
+    return "Uncertain"
+
+
+def _pick_alternate_weather(
+    *,
+    guild_id: int,
+    ig: InGameDate,
+    location: str,
+    actual_desc: str,
+    today_key: str,
+) -> str:
+    season = season_for_month(ig.month)
+    options = _apply_biome_biases(WEATHER_TABLE[season], season, location)
+
+    actual_base = actual_desc.split(".", 1)[0].strip().lower()
+
+    filtered: List[Tuple[str, int]] = []
+    for desc, w in options:
+        if desc.strip().lower() != actual_base:
+            filtered.append((desc, w))
+
+    if not filtered:
+        return actual_desc
+
+    seed = _stable_seed(
+        "FORECAST_WRONG",
+        str(guild_id),
+        today_key,
+        f"{ig.year:04d}-{ig.month:02d}-{ig.day:02d}",
+        (location or "").strip().lower(),
+    )
+    rng = random.Random(seed)
+
+    total = sum(w for _, w in filtered)
+    roll = rng.randint(1, total)
+    acc = 0
+    for desc, w in filtered:
+        acc += w
+        if roll <= acc:
+            flavor = {
+                1: " If the wind holds, expect it.",
+                2: " Signs point that way—for now.",
+                3: " The sky suggests it, but not decisively.",
+                4: " Conditions could shift overnight.",
+                5: " Local sailors swear by this read.",
+                6: " Watch the horizon; it may change.",
+            }[rng.randint(1, 6)]
+            return f"{desc}.{flavor}"
+
+    return filtered[-1][0]
+
+
+def forecast_weather(
+    *,
+    guild_id: int,
+    ig_today: InGameDate,
+    ig_target: InGameDate,
+    lead_days: int,
+    location: str,
+) -> str:
+    actual = generate_weather(guild_id=guild_id, ig=ig_target, location=location)
+    today_key = f"{ig_today.year:04d}-{ig_today.month:02d}-{ig_today.day:02d}"
+
+    acc = _forecast_accuracy(lead_days)
+    seed = _stable_seed(
+        "FORECAST_HITCHECK",
+        str(guild_id),
+        today_key,
+        f"{ig_target.year:04d}-{ig_target.month:02d}-{ig_target.day:02d}",
+        (location or "").strip().lower(),
+    )
+    rng = random.Random(seed)
+
+    if rng.random() <= acc:
+        return actual
+    return _pick_alternate_weather(
+        guild_id=guild_id,
+        ig=ig_target,
+        location=location,
+        actual_desc=actual,
+        today_key=today_key,
+    )
+
+
+# -----------------------------
 # Names (configurable)
 # -----------------------------
 
 DEFAULT_MONTH_NAMES = [
-    "Frostwane", "Thawrise", "Dawnspring", "Greengrow", "Brightbloom", "Suncrest",
-    "Highsummer", "Harvestgold", "Redfall", "Longdusk", "Nightsdeep", "Yearsend",
+    "Icehold", "Frostwane", "Rainrich", "Lightwake", "Sunswell", "Greenflux",
+    "Sunfade", "Stormreign", "Amberfell", "Auburncrown", "Icefleet", "Frostcrest",
 ]
 
 DEFAULT_WEEKDAY_NAMES = [
-    "Oneday", "Twoday", "Threeday", "Fourday", "Fiveday",
-    "Sixday", "Sevenday", "Eightday", "Nineday", "Tenday",
+    "Solies", "Halos", "Incedis", "Talis", "Inanos",
+    "Penumus", "Oris", "Neptis", "Anaemis", "Anaemis",
 ]
 
 
@@ -271,13 +353,11 @@ class WestmarchCalendarWeather(commands.Cog):
         self.config.register_guild(
             epoch_real_date="2026-01-26",
             epoch_ingame_day_number=1,
-            location="Coast",  # ✅ default as requested
+            location="Coast",
             show_weekday=True,
             month_names=DEFAULT_MONTH_NAMES,
             weekday_names=DEFAULT_WEEKDAY_NAMES,
         )
-
-    # ---- helpers ----
 
     @staticmethod
     def _today_utc_date() -> date:
@@ -322,7 +402,7 @@ class WestmarchCalendarWeather(commands.Cog):
     # TOP-LEVEL PLAYER COMMANDS
     # -----------------------------
 
-    @commands.command(name="date"])
+    @commands.command(name="date")
     async def wmdate(self, ctx: commands.Context):
         """Show today's in-game date (Red Hawk)."""
         ig = await self._get_ingame_for_offset(ctx.guild, 0)
@@ -333,12 +413,9 @@ class WestmarchCalendarWeather(commands.Cog):
         embed.set_footer(text="Red Hawk Westmarch • 1 real day = 1 in-game day (UTC)")
         await ctx.send(embed=embed)
 
-    @commands.command(name="weather"])
+    @commands.command(name="weather")
     async def wmweather(self, ctx: commands.Context, offset: int = 0):
-        """
-        Show in-game weather.
-        offset: 0=today, 1=tomorrow, -1=yesterday, etc.
-        """
+        """Show in-game weather (truth)."""
         ig = await self._get_ingame_for_offset(ctx.guild, offset)
         loc = await self.config.guild(ctx.guild).location()
         wx = generate_weather(guild_id=ctx.guild.id, ig=ig, location=loc or "")
@@ -357,52 +434,51 @@ class WestmarchCalendarWeather(commands.Cog):
         if loc:
             embed.add_field(name="Location", value=loc, inline=True)
         embed.add_field(name="Season", value=season_for_month(ig.month), inline=True)
-        embed.set_footer(text="Deterministic per day (seeded by guild + date + location).")
+        embed.set_footer(text="Truth: deterministic per day (seeded by guild + date + location).")
         await ctx.send(embed=embed)
 
-    @commands.command(name="forecast"])
+    @commands.command(name="forecast”)
     async def wmforecast(self, ctx: commands.Context, days: int = 3):
-        """Show a short forecast for the next N in-game days (default 3, max 10)."""
+        """Forecast next N in-game days (usually right; less reliable further out)."""
         if days < 1:
             return await ctx.send("Days must be >= 1.")
-        days = min(days, 3)
+        days = min(days, 5)
 
         loc = await self.config.guild(ctx.guild).location()
+        ig_today = await self._get_ingame_for_offset(ctx.guild, 0)
 
         lines = []
-        for i in range(days):
-            ig = await self._get_ingame_for_offset(ctx.guild, i)
-            wx = generate_weather(guild_id=ctx.guild.id, ig=ig, location=loc or "")
-            month_name = await self._name_month(ctx.guild, ig.month)
-            lines.append(f"**Y{ig.year} {month_name} {ig.day}** — {wx}")
+        for lead in range(days):
+            ig_target = await self._get_ingame_for_offset(ctx.guild, lead)
+            predicted = forecast_weather(
+                guild_id=ctx.guild.id,
+                ig_today=ig_today,
+                ig_target=ig_target,
+                lead_days=lead,
+                location=loc or "",
+            )
+            conf = forecast_confidence_label(lead)
+            month_name = await self._name_month(ctx.guild, ig_target.month)
+            lines.append(f"**Y{ig_target.year} {month_name} {ig_target.day}** — *{conf}* — {predicted}")
 
         embed = discord.Embed(title=f"🌤️ Red Hawk Forecast — Next {days} day(s)", description="\n".join(lines))
         if loc:
             embed.add_field(name="Location", value=loc, inline=True)
-        embed.set_footer(text="Weather is deterministic; tweak tables/biomes in the cog to fit your world.")
+        embed.set_footer(text="Confidence is based on lead time (tomorrow > later).")
         await ctx.send(embed=embed)
 
     # -----------------------------
     # TOP-LEVEL ADMIN/SETTINGS
     # -----------------------------
 
-    @commands.command(name="rhsetepoch"])
+    @commands.command(name="rhsetepoch")
     @commands.admin_or_permissions(manage_guild=True)
     async def wmsetepoch(self, ctx: commands.Context, real_date: str, ig_day_number: int = 1):
-        """
-        Set the epoch mapping.
-
-        real_date: YYYY-MM-DD (UTC date)
-        ig_day_number: absolute in-game day number for that real date (default 1)
-
-        Example:
-        [p]wmsetepoch 2026-01-01 120
-        """
+        """Set the epoch mapping: YYYY-MM-DD (UTC) ↔ absolute in-game day number."""
         try:
             parsed = date.fromisoformat(real_date)
         except Exception:
             return await ctx.send("Please use YYYY-MM-DD, e.g. `2026-01-26`.")
-
         if ig_day_number < 1:
             return await ctx.send("`ig_day_number` must be >= 1.")
 
@@ -415,67 +491,47 @@ class WestmarchCalendarWeather(commands.Cog):
             f"(Year {ig.year}, Month {ig.month}, Day {ig.day})."
         )
 
-    @commands.command(name="rhlocation"])
+    @commands.command(name="rhlocation")
     @commands.admin_or_permissions(manage_guild=True)
     async def wmlocation(self, ctx: commands.Context, *, location: str = ""):
-        """
-        Set weather location/biome seed.
-
-        Example:
-        [p]wmlocation Coast
-        """
+        """Set weather location/biome seed (e.g. Coast)."""
         await self.config.guild(ctx.guild).location.set(location.strip())
         if location.strip():
             await ctx.send(f"✅ Weather location set to: **{location.strip()}**")
         else:
             await ctx.send("✅ Weather location cleared (no biome seed).")
 
-    @commands.command(name="rhweekday"])
+    @commands.command(name="rhweekday")
     @commands.admin_or_permissions(manage_guild=True)
     async def wmweekday(self, ctx: commands.Context, enabled: Optional[bool] = None):
-        """
-        Toggle showing weekday/week info in wmdate.
-        If enabled is omitted, it flips the setting.
-        """
+        """Toggle showing weekday/week info in wmdate."""
         cur = await self.config.guild(ctx.guild).show_weekday()
         if enabled is None:
             enabled = not cur
         await self.config.guild(ctx.guild).show_weekday.set(bool(enabled))
         await ctx.send(f"✅ show_weekday set to **{bool(enabled)}**.")
 
-    @commands.command(name="rhsetmonthnames"])
+    @commands.command(name="rhsetmonthnames")
     @commands.admin_or_permissions(manage_guild=True)
     async def wmsetmonthnames(self, ctx: commands.Context, *, names: str):
-        """
-        Set all 12 month names at once.
-        Provide 12 names separated by commas.
-
-        Example:
-        [p]wmsetmonthnames Frostwane, Thawrise, Dawnspring, ...
-        """
+        """Set all 12 month names at once (comma-separated)."""
         parts = [p.strip() for p in names.split(",") if p.strip()]
         if len(parts) != 12:
             return await ctx.send("Please provide exactly **12** comma-separated month names.")
         await self.config.guild(ctx.guild).month_names.set(parts)
         await ctx.send("✅ Month names updated.")
 
-    @commands.command(name="rhsetweekdaynames"])
+    @commands.command(name="rhsetweekdaynames")
     @commands.admin_or_permissions(manage_guild=True)
     async def wmsetweekdaynames(self, ctx: commands.Context, *, names: str):
-        """
-        Set all 10 weekday names at once.
-        Provide 10 names separated by commas.
-
-        Example:
-        [p]wmsetweekdaynames Oneday, Twoday, Threeday, ...
-        """
+        """Set all 10 weekday names at once (comma-separated)."""
         parts = [p.strip() for p in names.split(",") if p.strip()]
         if len(parts) != 10:
             return await ctx.send("Please provide exactly **10** comma-separated weekday names.")
         await self.config.guild(ctx.guild).weekday_names.set(parts)
         await ctx.send("✅ Weekday names updated.")
 
-    @commands.command(name="rhnamesreset"])
+    @commands.command(name="rhnamesreset")
     @commands.admin_or_permissions(manage_guild=True)
     async def wmnamesreset(self, ctx: commands.Context):
         """Reset month + weekday names to defaults."""
