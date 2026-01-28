@@ -35,7 +35,7 @@ from discord.ext import tasks
 from redbot.core import Config, commands
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
-AUTOPOST_HOUR_PT = 7  # 7 AM Pacific
+AUTOPOST_HOUR_PT = 12  # 7 AM Pacific
 AUTOPOST_MINUTE_PT = 0  # keep simple; loop checks frequently
 
 
