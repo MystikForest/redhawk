@@ -11,7 +11,8 @@ from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import discord
-from redbot.core import Config, commands, tasks
+from redbot.core import Config, commands
+from discord.ext import tasks
 
 
 # =============================
