@@ -457,7 +457,7 @@ class RedHawk(commands.Cog):
         wx_today = generate_weather(guild_id=guild.id, ig=ig_today, location=loc)
 
         forecast_lines: List[str] = []
-        for lead in range(10):
+        for lead in range(1,11):
             ig_target = await self._get_ingame_for_offset(guild, lead)
             predicted = forecast_weather(
                 guild_id=guild.id,
