@@ -39,21 +39,21 @@ HOLIDAY_DAY = 15  # "middle" day of the month (for 30/31 day months)
 
 # Edit names freely:
 ODD_YEAR_HOLIDAYS: Dict[int, str] = {
-    1: "Deepfrost Vigil",
-    3: "Rainswake",
-    5: "Highsun Convocation",
-    7: "Ashen Calm",
-    9: "Harvest Oath",
-    11: "Long Night’s Watch",
+    1: "Hearthmend Eve",
+    3: "Mossbirth Day",
+    5: "Embershare Day",
+    7: "Deep Toll",
+    9: "Honeyguard Day",
+    11: "Quietbound Night",
 }
 
 EVEN_YEAR_HOLIDAYS: Dict[int, str] = {
-    2: "Frostbreak",
-    4: "Bloomcall",
-    6: "Greencrest",
-    8: "Stormtide",
-    10: "Emberfall",
-    12: "Year’s Turning",
+    2: "River’s Wake",
+    4: "Lanternveil Night",
+    6: "Milkmoon Festival",
+    8: "Bloomstride Parade",
+    10: "Rainsong Carnival",
+    12: "Wishfrost Morning",
 }
 
 
