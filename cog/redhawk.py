@@ -1,22 +1,46 @@
 # redhawk.py
 # Red-DiscordBot cog: Red Hawk Westmarch calendar + deterministic daily weather + "usually right" forecast
-# + autopost (daily) + alternating-year holidays + autopost includes 10-day forecast.
+# + alternating-year holidays + daily autopost at 7:00 AM Pacific + autopost includes a 10-day forecast.
+#
+# Player commands:
+#   [p]date
+#   [p]weather [offset]
+#   [p]forecast [days]   (defaults to 10, max 10)
+#
+# Admin commands:
+#   [p]wmautopost #channel
+#   [p]wmautopost off
+#   [p]wmsetepoch YYYY-MM-DD [ig_day_number]
+#   [p]wmlocation <text>
+#   [p]wmweekday [true/false]
+#   [p]wmsetmonthnames name1, ... (12)
+#   [p]wmsetweekdaynames name1, ... (10)
+#   [p]wmnamesreset
+#
+# Time rules:
+# - In-game day rolls over at midnight Pacific time (America/Los_Angeles).
+# - Autopost sends at/after 7:00 AM Pacific time, once per day.
 
 from __future__ import annotations
 
 import hashlib
 import random
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import discord
-from redbot.core import Config, commands
 from discord.ext import tasks
+from redbot.core import Config, commands
+
+PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
+AUTOPOST_HOUR_PT = 7  # 7 AM Pacific
+AUTOPOST_MINUTE_PT = 0  # keep simple; loop checks frequently
 
 
 # =============================
-# Names (your provided canon)
+# Canonical calendar names
 # =============================
 
 DEFAULT_MONTH_NAMES = [
@@ -32,20 +56,19 @@ DEFAULT_WEEKDAY_NAMES = [
 
 # =============================
 # Holidays (alternating years)
-# Odd years: middle of odd months
-# Even years: middle of even months
+# odd years -> middle of odd months
+# even years -> middle of even months
 # =============================
 
-HOLIDAY_DAY = 15  # "middle" day of the month (for 30/31 day months)
+HOLIDAY_DAY = 15  # "middle" day of the month
 
-# Edit names freely:
 ODD_YEAR_HOLIDAYS: Dict[int, str] = {
     1: "Hearthmend Eve",
     3: "Mossbirth Day",
     5: "Embershare Day",
     7: "Deep Toll",
     9: "Honeyguard Day",
-    11: "Quietbound Night",
+    11: "Quietbound Night",  # filled placeholder
 }
 
 EVEN_YEAR_HOLIDAYS: Dict[int, str] = {
@@ -85,6 +108,7 @@ class InGameDate:
 
 
 def is_leap_year(year: int) -> bool:
+    # Every 4th year has 366
     return year % 4 == 0
 
 
@@ -93,27 +117,31 @@ def year_length(year: int) -> int:
 
 
 def month_lengths_for_year(year: int) -> List[int]:
+    """
+    Base 30-day months, then distribute extras to every other (even) month.
+    Normal year: +5 extras -> months 2,4,6,8,10 are 31 days; month 12 stays 30.
+    Leap year:   +6 extras -> months 2,4,6,8,10,12 are 31 days.
+    """
     lengths = [BASE_DAYS_PER_MONTH] * MONTHS_PER_YEAR
     extras = 6 if is_leap_year(year) else 5
-    even_months = [2, 4, 6, 8, 10, 12]
-    for m in even_months[:extras]:
+    for m in [2, 4, 6, 8, 10, 12][:extras]:
         lengths[m - 1] += 1
     return lengths
 
 
 def day_number_to_ingame(day_number: int) -> InGameDate:
+    """
+    Absolute in-game day_number is 1-indexed.
+    day_number=1 -> Year 1, Month 1, Day 1
+    """
     if day_number < 1:
         raise ValueError("day_number must be >= 1")
 
     y = 1
     remaining = day_number
-    while True:
-        yl = year_length(y)
-        if remaining > yl:
-            remaining -= yl
-            y += 1
-        else:
-            break
+    while remaining > year_length(y):
+        remaining -= year_length(y)
+        y += 1
 
     lengths = month_lengths_for_year(y)
     m = 1
@@ -131,6 +159,7 @@ def day_number_to_ingame(day_number: int) -> InGameDate:
 # =============================
 
 def season_for_month(month: int) -> str:
+    # 1-3 Winter, 4-6 Spring, 7-9 Summer, 10-12 Autumn
     if month in (1, 2, 3):
         return "Winter"
     if month in (4, 5, 6):
@@ -175,6 +204,7 @@ WEATHER_TABLE: Dict[str, List[Tuple[str, int]]] = {
     ],
 }
 
+# Optional biome bias (kept)
 BIOME_BIASES: Dict[str, Dict[str, Dict[str, int]]] = {
     "coast": {
         "Winter": {
@@ -249,6 +279,7 @@ def generate_weather(*, guild_id: int, ig: InGameDate, location: str = "") -> st
     for desc, w in options:
         acc += w
         if roll <= acc:
+            # short deterministic flavor
             flavor = {
                 1: " The air feels oddly still.",
                 2: " Distant gulls cry over the water.",
@@ -266,6 +297,7 @@ def generate_weather(*, guild_id: int, ig: InGameDate, location: str = "") -> st
 # =============================
 
 def _forecast_accuracy(lead_days: int) -> float:
+    # 0: 92%, 1: 86%, 2: 80%, 3: 74%, then down to 55% floor
     acc = 0.92 - (0.06 * lead_days)
     return max(0.55, min(0.92, acc))
 
@@ -291,12 +323,7 @@ def _pick_alternate_weather(
     options = _apply_biome_biases(WEATHER_TABLE[season], season, location)
 
     actual_base = actual_desc.split(".", 1)[0].strip().lower()
-
-    filtered: List[Tuple[str, int]] = []
-    for desc, w in options:
-        if desc.strip().lower() != actual_base:
-            filtered.append((desc, w))
-
+    filtered: List[Tuple[str, int]] = [(desc, w) for desc, w in options if desc.strip().lower() != actual_base]
     if not filtered:
         return actual_desc
 
@@ -339,7 +366,6 @@ def forecast_weather(
     actual = generate_weather(guild_id=guild_id, ig=ig_target, location=location)
     today_key = f"{ig_today.year:04d}-{ig_today.month:02d}-{ig_today.day:02d}"
 
-    acc = _forecast_accuracy(lead_days)
     seed = _stable_seed(
         "FORECAST_HITCHECK",
         str(guild_id),
@@ -349,7 +375,7 @@ def forecast_weather(
     )
     rng = random.Random(seed)
 
-    if rng.random() <= acc:
+    if rng.random() <= _forecast_accuracy(lead_days):
         return actual
 
     return _pick_alternate_weather(
@@ -366,7 +392,7 @@ def forecast_weather(
 # =============================
 
 class RedHawk(commands.Cog):
-    """Red Hawk: in-game calendar + weather for a Westmarch server."""
+    """Red Hawk: in-game calendar + weather + autopost for a Westmarch server."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -378,26 +404,31 @@ class RedHawk(commands.Cog):
             show_weekday=True,
             month_names=DEFAULT_MONTH_NAMES,
             weekday_names=DEFAULT_WEEKDAY_NAMES,
-            # Autopost
             autopost_channel_id=None,   # int | None
-            autopost_last_utc=None,     # "YYYY-MM-DD" | None
+            autopost_last_pt=None,      # "YYYY-MM-DD" | None (Pacific date key)
         )
         self._autopost_loop.start()
 
     def cog_unload(self):
         self._autopost_loop.cancel()
 
-    # ---- helpers ----
+    # ---- time helpers ----
 
     @staticmethod
-    def _today_utc_date() -> date:
-        return datetime.now(timezone.utc).date()
+    def _now_pt() -> datetime:
+        return datetime.now(PACIFIC_TZ)
+
+    @classmethod
+    def _today_pt_date(cls) -> date:
+        return cls._now_pt().date()
+
+    # ---- calendar helpers ----
 
     async def _get_ingame_day_number_today(self, guild: discord.Guild) -> int:
         data = await self.config.guild(guild).all()
         epoch_real = date.fromisoformat(data["epoch_real_date"])
         epoch_ig = int(data["epoch_ingame_day_number"])
-        delta_days = (self._today_utc_date() - epoch_real).days
+        delta_days = (self._today_pt_date() - epoch_real).days
         return epoch_ig + delta_days
 
     async def _get_ingame_for_offset(self, guild: discord.Guild, offset: int) -> InGameDate:
@@ -407,22 +438,19 @@ class RedHawk(commands.Cog):
 
     async def _month_name(self, guild: discord.Guild, month: int) -> str:
         names = await self.config.guild(guild).month_names()
-        if isinstance(names, list) and len(names) == 12:
-            return names[month - 1]
-        return f"Month {month}"
+        return names[month - 1] if isinstance(names, list) and len(names) == 12 else f"Month {month}"
 
     async def _weekday_name(self, guild: discord.Guild, weekday: int) -> str:
         names = await self.config.guild(guild).weekday_names()
-        if isinstance(names, list) and len(names) == 10:
-            return names[weekday - 1]
-        return f"Day {weekday}"
+        return names[weekday - 1] if isinstance(names, list) and len(names) == 10 else f"Day {weekday}"
 
     async def _holiday_for(self, ig: InGameDate) -> Optional[str]:
-        # Middle of odd months in odd years; middle of even months in even years
         if ig.day != HOLIDAY_DAY:
             return None
         if ig.year % 2 == 1:
+            # odd years -> odd months only (table contains only odd months)
             return ODD_YEAR_HOLIDAYS.get(ig.month)
+        # even years -> even months only
         return EVEN_YEAR_HOLIDAYS.get(ig.month)
 
     async def _format_date_line(self, guild: discord.Guild, ig: InGameDate) -> str:
@@ -430,11 +458,8 @@ class RedHawk(commands.Cog):
         month_name = await self._month_name(guild, ig.month)
         if show_weekday:
             weekday_name = await self._weekday_name(guild, ig.weekday)
-            return (
-                f"**{weekday_name}**, **{month_name}** {ig.day}\n"
-                f"Year **{ig.year}** • Day {ig.day_of_year} • Week {ig.week}"
-            )
-        return f"**{month_name}** {ig.day}, Year **{ig.year}** (Day {ig.day_of_year})"
+            return f"**{weekday_name}**, **{month_name}** {ig.day}\nYear **{ig.year}** • Day {ig.day_of_year} • Week {ig.week}"
+        return f"**{month_name}** {ig.day}\nYear **{ig.year}** • Day {ig.day_of_year}"
 
     # =============================
     # PLAYER COMMANDS
@@ -443,10 +468,9 @@ class RedHawk(commands.Cog):
     @commands.command(name="date")
     async def date_cmd(self, ctx: commands.Context):
         ig = await self._get_ingame_for_offset(ctx.guild, 0)
-        line = await self._format_date_line(ctx.guild, ig)
         holiday = await self._holiday_for(ig)
 
-        embed = discord.Embed(title="📅 Red Hawk Date", description=line)
+        embed = discord.Embed(title="📅 Red Hawk Date", description=await self._format_date_line(ctx.guild, ig))
         embed.add_field(name="Season", value=season_for_month(ig.month), inline=True)
         if holiday:
             embed.add_field(name="Holiday", value=holiday, inline=False)
@@ -455,8 +479,11 @@ class RedHawk(commands.Cog):
     @commands.command(name="weather")
     async def weather_cmd(self, ctx: commands.Context, offset: int = 0):
         ig = await self._get_ingame_for_offset(ctx.guild, offset)
-        loc = await self.config.guild(ctx.guild).location()
-        wx = generate_weather(guild_id=ctx.guild.id, ig=ig, location=loc or "")
+        cfg = await self.config.guild(ctx.guild).all()
+        loc = cfg.get("location") or ""
+        holiday = await self._holiday_for(ig)
+
+        wx = generate_weather(guild_id=ctx.guild.id, ig=ig, location=loc)
 
         when = (
             "Today" if offset == 0 else
@@ -465,11 +492,8 @@ class RedHawk(commands.Cog):
             f"Day {offset:+d}"
         )
 
-        date_line = await self._format_date_line(ctx.guild, ig)
-        holiday = await self._holiday_for(ig)
-
         embed = discord.Embed(title=f"⛅ Red Hawk Weather — {when}", description=wx)
-        embed.add_field(name="Date", value=date_line, inline=False)
+        embed.add_field(name="Date", value=await self._format_date_line(ctx.guild, ig), inline=False)
         if loc:
             embed.add_field(name="Location", value=loc, inline=True)
         embed.add_field(name="Season", value=season_for_month(ig.month), inline=True)
@@ -479,15 +503,16 @@ class RedHawk(commands.Cog):
 
     @commands.command(name="forecast")
     async def forecast_cmd(self, ctx: commands.Context, days: int = 10):
-        # Default to 10-day forecast; clamp to 1..10
         if days < 1:
             return await ctx.send("Days must be >= 1.")
         days = min(days, 10)
 
-        loc = await self.config.guild(ctx.guild).location()
-        ig_today = await self._get_ingame_for_offset(ctx.guild, 0)
+        cfg = await self.config.guild(ctx.guild).all()
+        loc = cfg.get("location") or ""
 
-        lines = []
+        ig_today = await self._get_ingame_for_offset(ctx.guild, 0)
+        lines: List[str] = []
+
         for lead in range(days):
             ig_target = await self._get_ingame_for_offset(ctx.guild, lead)
             predicted = forecast_weather(
@@ -495,7 +520,7 @@ class RedHawk(commands.Cog):
                 ig_today=ig_today,
                 ig_target=ig_target,
                 lead_days=lead,
-                location=loc or "",
+                location=loc,
             )
             conf = forecast_confidence_label(lead)
             month_name = await self._month_name(ctx.guild, ig_target.month)
@@ -518,26 +543,26 @@ class RedHawk(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     async def wmautopost(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
         """
-        Enable or disable daily autopost.
+        Enable or disable daily autopost (7 AM Pacific).
 
         Examples:
           [p]wmautopost #calendar
           [p]wmautopost off
         """
-        # Allow "off" as a pseudo-channel argument
-        if channel is None and ctx.message.content.strip().lower().endswith(" off"):
+        content = (ctx.message.content or "").strip().lower()
+        if channel is None and content.endswith(" off"):
             await self.config.guild(ctx.guild).autopost_channel_id.set(None)
-            await self.config.guild(ctx.guild).autopost_last_utc.set(None)
+            await self.config.guild(ctx.guild).autopost_last_pt.set(None)
             return await ctx.send("✅ Autopost disabled.")
 
         if channel is None:
             return await ctx.send("Usage: `wmautopost #channel` or `wmautopost off`")
 
         await self.config.guild(ctx.guild).autopost_channel_id.set(channel.id)
-        await ctx.send(f"✅ Autopost enabled in {channel.mention}")
+        await ctx.send(f"✅ Autopost enabled in {channel.mention} (posts at 7 AM Pacific)")
 
     # =============================
-    # ADMIN / SETTINGS (unchanged)
+    # ADMIN / SETTINGS
     # =============================
 
     @commands.command(name="wmsetepoch", aliases=["rhsetepoch"])
@@ -566,7 +591,7 @@ class RedHawk(commands.Cog):
         if location.strip():
             await ctx.send(f"✅ Weather location set to: **{location.strip()}**")
         else:
-            await ctx.send("✅ Weather location cleared (no biome seed).")
+            await ctx.send("✅ Weather location cleared.")
 
     @commands.command(name="wmweekday", aliases=["rhweekday"])
     @commands.admin_or_permissions(manage_guild=True)
@@ -603,21 +628,26 @@ class RedHawk(commands.Cog):
         await ctx.send("✅ Month and weekday names reset to defaults.")
 
     # =============================
-    # AUTPOST LOOP (posts once per UTC day)
-    # Includes 10-day forecast
+    # AUTOPOST LOOP (7 AM Pacific)
+    # includes 10-day forecast
     # =============================
 
     @tasks.loop(minutes=5)
     async def _autopost_loop(self):
-        utc_today = self._today_utc_date().isoformat()
+        now_pt = self._now_pt()
+        today_key = now_pt.date().isoformat()
 
-        for guild in self.bot.guilds:
+        # Not time yet (before 7:00 AM Pacific)
+        if (now_pt.hour, now_pt.minute) < (AUTOPOST_HOUR_PT, AUTOPOST_MINUTE_PT):
+            return
+
+        for guild in list(self.bot.guilds):
             cfg = await self.config.guild(guild).all()
             ch_id = cfg.get("autopost_channel_id")
             if not ch_id:
                 continue
 
-            if cfg.get("autopost_last_utc") == utc_today:
+            if cfg.get("autopost_last_pt") == today_key:
                 continue
 
             channel = guild.get_channel(ch_id)
@@ -625,13 +655,11 @@ class RedHawk(commands.Cog):
                 continue
 
             ig_today = await self._get_ingame_for_offset(guild, 0)
-            date_line = await self._format_date_line(guild, ig_today)
             holiday_today = await self._holiday_for(ig_today)
-
             loc = cfg.get("location") or ""
             wx_today = generate_weather(guild_id=guild.id, ig=ig_today, location=loc)
 
-            # Build 10-day forecast (lead 0..9)
+            # 10-day forecast (lead 0..9)
             forecast_lines: List[str] = []
             for lead in range(10):
                 ig_target = await self._get_ingame_for_offset(guild, lead)
@@ -647,26 +675,25 @@ class RedHawk(commands.Cog):
                 weekday_name = await self._weekday_name(guild, ig_target.weekday)
                 hol = await self._holiday_for(ig_target)
 
-                line = f"{weekday_name} {month_name} {ig_target.day}: {conf} — {predicted.split('.', 1)[0]}"
+                # Keep forecast compact in autopost: only base weather phrase (before the first '.')
+                base_pred = predicted.split(".", 1)[0]
+                line = f"{weekday_name} {month_name} {ig_target.day}: {conf} — {base_pred}"
                 if hol:
                     line += f" (🎉 {hol})"
                 forecast_lines.append(line)
 
             embed = discord.Embed(title="📣 Red Hawk Daily Report")
-            embed.add_field(name="Date", value=date_line, inline=False)
+            embed.add_field(name="Date", value=await self._format_date_line(guild, ig_today), inline=False)
             embed.add_field(name="Weather", value=wx_today, inline=False)
             if holiday_today:
                 embed.add_field(name="Holiday", value=holiday_today, inline=False)
-
-            # Keep forecast compact inside one field
             embed.add_field(name="10-Day Forecast", value="\n".join(forecast_lines), inline=False)
 
             await channel.send(embed=embed)
-            await self.config.guild(guild).autopost_last_utc.set(utc_today)
+            await self.config.guild(guild).autopost_last_pt.set(today_key)
 
     @_autopost_loop.before_loop
     async def _before_autopost(self):
-        # Ensure the bot is ready before loop starts
         await self.bot.wait_until_red_ready()
 
 
