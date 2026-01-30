@@ -542,7 +542,7 @@ class RedHawk(commands.Cog):
         ig_today = await self._get_ingame_for_offset(ctx.guild, 0)
         lines: List[str] = []
 
-        for lead in range(days):
+        for lead in range(1,days+1):
             ig_target = await self._get_ingame_for_offset(ctx.guild, lead)
             predicted = forecast_weather(
                 guild_id=ctx.guild.id,
