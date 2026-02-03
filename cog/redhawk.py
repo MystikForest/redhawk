@@ -487,7 +487,7 @@ class RedHawk(commands.Cog):
         if holiday_today:
             embed.add_field(name="Holiday", value=holiday_today, inline=False)
         embed.add_field(name="10-Day Forecast", value="\n".join(forecast_lines), inline=False)
-        embed.add_field(name="[Calender](https://app.fantasy-calendar.com/calendars/7028edd5f268382b124a5d076a0e0717)", inline=False)
+        embed.add_field(name="Calender", value="[Link](https://app.fantasy-calendar.com/calendars/7028edd5f268382b124a5d076a0e0717)", inline=False)
 
         await channel.send(embed=embed)
 
