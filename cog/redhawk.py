@@ -153,11 +153,11 @@ def day_number_to_ingame(day_number: int) -> InGameDate:
 # =============================
 
 def season_for_month(month: int) -> str:
-    if month in (1, 2, 3):
+    if month in (11, 12, 1):
         return "Winter"
-    if month in (4, 5, 6):
+    if month in (2, 3, 4):
         return "Spring"
-    if month in (7, 8, 9):
+    if month in (5, 6, 7):
         return "Summer"
     return "Autumn"
 
