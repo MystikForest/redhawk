@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 import discord
 from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import humanize_number
@@ -21,6 +22,10 @@ class MessageLog(commands.Cog):
             "ignored_channels": [],
             "ignored_categories": [],
             "auto_ignore_log_channel": True,
+            # NEW: ignore deletes when the deleter is a bot (per audit log)
+            "ignore_bot_deletes": True,
+            # How far back to look in the audit log for a matching delete entry
+            "audit_window_seconds": 10,
         }
         self.config.register_guild(**default_guild)
 
@@ -96,6 +101,47 @@ class MessageLog(commands.Cog):
 
         return category_id in ignored_categories if category_id else False
 
+    async def _was_deleted_by_bot(self, message: discord.Message) -> bool:
+        """
+        Check audit logs to determine if a BOT deleted this user's message.
+        Requires View Audit Log permission.
+        """
+        guild = message.guild
+        if guild is None:
+            return False
+
+        me = guild.me or guild.get_member(self.bot.user.id)  # type: ignore
+        if not me or not me.guild_permissions.view_audit_log:
+            return False
+
+        window_seconds = await self.config.guild(guild).audit_window_seconds()
+        window = timedelta(seconds=max(1, int(window_seconds)))
+        now = discord.utils.utcnow()
+
+        try:
+            async for entry in guild.audit_logs(limit=8, action=discord.AuditLogAction.message_delete):
+                # Must match the message author
+                if not entry.target or getattr(entry.target, "id", None) != message.author.id:
+                    continue
+
+                # Must match the channel (audit log provides channel in entry.extra.channel)
+                extra_channel = getattr(getattr(entry, "extra", None), "channel", None)
+                if not extra_channel or getattr(extra_channel, "id", None) != message.channel.id:
+                    continue
+
+                # Must be recent (avoid matching older deletes)
+                if entry.created_at and (now - entry.created_at) > window:
+                    continue
+
+                # If deleter is a bot (and not the author), ignore
+                if entry.user and entry.user.id != message.author.id and entry.user.bot:
+                    return True
+        except Exception:
+            # If audit logs error out, fail open (log it)
+            return False
+
+        return False
+
     # ------------------------- Events -------------------------
 
     @commands.Cog.listener()
@@ -118,6 +164,12 @@ class MessageLog(commands.Cog):
         if isinstance(message.author, discord.Member):
             if await self._member_has_ignored_role(message.author):
                 return
+
+        # NEW: Ignore deletion if a bot deleted a user's message (audit log check)
+        if await self.config.guild(message.guild).ignore_bot_deletes():
+            if not message.author.bot:
+                if await self._was_deleted_by_bot(message):
+                    return
 
         # Check enabled + log channel
         if not await self.config.guild(message.guild).enabled():
@@ -221,7 +273,6 @@ class MessageLog(commands.Cog):
             inline=False,
         )
 
-        # Attachments note (helps when someone adds/removes files)
         if before.attachments != after.attachments:
             embed.add_field(
                 name="Attachments (before)",
@@ -394,6 +445,21 @@ class MessageLog(commands.Cog):
         await self.config.guild(ctx.guild).auto_ignore_log_channel.set(enabled)
         await ctx.send(f"✅ Auto-ignore log channel: **{enabled}**.")
 
+    # ----- Ignore bot deletes (audit log) -----
+
+    @msglog.command(name="ignorebotdeletes")
+    async def msglog_ignorebotdeletes(self, ctx: commands.Context, enabled: bool):
+        """Ignore deletions when the deleter is a bot (requires View Audit Log)."""
+        await self.config.guild(ctx.guild).ignore_bot_deletes.set(enabled)
+        await ctx.send(f"✅ Ignore bot-performed deletions: **{enabled}**.")
+
+    @msglog.command(name="auditwindow")
+    async def msglog_auditwindow(self, ctx: commands.Context, seconds: int):
+        """Set audit log match window in seconds (1-60)."""
+        seconds = max(1, min(int(seconds), 60))
+        await self.config.guild(ctx.guild).audit_window_seconds.set(seconds)
+        await ctx.send(f"✅ Audit log match window set to **{seconds}s**.")
+
     # ----- Settings -----
 
     @msglog.command(name="settings")
@@ -428,6 +494,9 @@ class MessageLog(commands.Cog):
         embed.add_field(name="Log bots", value=str(data["log_bots"]), inline=True)
         embed.add_field(name="Max content", value=str(data["max_content"]), inline=True)
         embed.add_field(name="Auto-ignore log channel", value=str(data.get("auto_ignore_log_channel", True)), inline=True)
+        embed.add_field(name="Ignore bot deletes", value=str(data.get("ignore_bot_deletes", True)), inline=True)
+        embed.add_field(name="Audit window (s)", value=str(data.get("audit_window_seconds", 10)), inline=True)
+
         embed.add_field(name="Log channel", value=channel.mention if channel else "Not set", inline=False)
         embed.add_field(name="Ignored roles", value=self._truncate(roles_value, 1024), inline=False)
         embed.add_field(name="Ignored channels", value=self._truncate(chans_value, 1024), inline=False)
