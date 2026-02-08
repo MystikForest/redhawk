@@ -8,9 +8,6 @@ from redbot.core.utils.chat_formatting import humanize_number
 class MessageLog(commands.Cog):
     """Logs deleted and edited messages to a configured channel, with ignore lists."""
 
-    __author__ = "ChatGPT"
-    __version__ = "1.2.0"
-
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=0xA11CE5E7, force_registration=True)
