@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import discord
 from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import humanize_number
@@ -10,11 +11,15 @@ class MessageLog(commands.Cog):
 
     Includes an optional audit-log based bypass to IGNORE deletions done by proxy bots
     like Tupperbox/PluralKit (so their “delete original message” behavior doesn’t spam logs).
+
+    NOTE: Discord audit log entries often arrive after on_message_delete fires,
+    so we sleep briefly before checking.
     """
 
+    __author__ = "ChatGPT"
+    __version__ = "1.3.1"
+
     # Public bot user IDs (from their invite client_id)
-    # Tupperbox: https://discord.com/oauth2/authorize?client_id=431544605209788416...
-    # PluralKit: https://discord.com/oauth2/authorize?client_id=466378653216014359...
     DEFAULT_PROXY_DELETER_BOT_IDS = [
         431544605209788416,  # Tupperbox
         466378653216014359,  # PluralKit
@@ -33,7 +38,6 @@ class MessageLog(commands.Cog):
             "ignored_channels": [],
             "ignored_categories": [],
             "auto_ignore_log_channel": True,
-            # NEW: ignore “user message got deleted by proxy bot” based on audit log
             "ignore_proxy_deleter_bots": True,
             "proxy_deleter_bot_ids": self.DEFAULT_PROXY_DELETER_BOT_IDS.copy(),
         }
@@ -115,7 +119,7 @@ class MessageLog(commands.Cog):
         """Best-effort: checks audit log to see if a configured bot deleted this user's message.
 
         Limitations:
-        - Requires the bot to have View Audit Log permission.
+        - Requires View Audit Log permission.
         - Audit log doesn’t include message ID, so this matches by (target user, channel, recency).
         - If many deletions happen at once, it can occasionally mismatch.
         """
@@ -127,37 +131,40 @@ class MessageLog(commands.Cog):
         if not await cfg.ignore_proxy_deleter_bots():
             return False
 
-        bot_member = guild.me
-        if not bot_member or not bot_member.guild_permissions.view_audit_log:
+        me = guild.me
+        if not me or not me.guild_permissions.view_audit_log:
             return False
 
         ignored_bot_ids = set(await cfg.proxy_deleter_bot_ids())
         if not ignored_bot_ids:
             return False
 
+        # Audit log entries often lag behind the delete event
+        await asyncio.sleep(1.2)
+
         now = discord.utils.utcnow()
 
         try:
-            async for entry in guild.audit_logs(
-                limit=6, action=discord.AuditLogAction.message_delete
-            ):
-                # entry.user is the executor (the deleter)
+            async for entry in guild.audit_logs(limit=15, action=discord.AuditLogAction.message_delete):
+                # executor (deleter) must be one of the proxy bots
                 if not entry.user or entry.user.id not in ignored_bot_ids:
                     continue
 
-                # entry.target is the user whose message was deleted
+                # target must be the author whose message got deleted
                 if not entry.target or getattr(entry.target, "id", None) != message.author.id:
                     continue
 
-                # channel match
                 extra = getattr(entry, "extra", None)
                 ch = getattr(extra, "channel", None)
                 if not ch or getattr(ch, "id", None) != message.channel.id:
                     continue
 
-                # time window (tight to reduce mismatch)
-                if entry.created_at and abs((now - entry.created_at).total_seconds()) <= 5:
-                    return True
+                # Timing window (audit log doesn't include message id)
+                if entry.created_at:
+                    age = abs((now - entry.created_at).total_seconds())
+                    if age <= 20:
+                        return True
+
         except (discord.Forbidden, discord.HTTPException):
             return False
 
@@ -461,7 +468,7 @@ class MessageLog(commands.Cog):
 
     @msglog.command(name="proxydeleterbots")
     async def msglog_proxydeleterbots(self, ctx: commands.Context):
-        """List bot IDs that are treated as 'proxy deleter bots'."""
+        """List bot IDs treated as 'proxy deleter bots'."""
         ids = await self.config.guild(ctx.guild).proxy_deleter_bot_ids()
         if not ids:
             return await ctx.send("No proxy deleter bots configured.")
@@ -495,11 +502,7 @@ class MessageLog(commands.Cog):
         data = await self.config.guild(ctx.guild).all()
         channel = ctx.guild.get_channel(data["log_channel_id"]) if data["log_channel_id"] else None
 
-        role_mentions = []
-        for rid in data.get("ignored_roles", []):
-            r = ctx.guild.get_role(rid)
-            if r:
-                role_mentions.append(r.mention)
+        role_mentions = [r.mention for rid in data.get("ignored_roles", []) if (r := ctx.guild.get_role(rid))]
         roles_value = ", ".join(role_mentions) if role_mentions else "None"
 
         channel_mentions = []
@@ -509,11 +512,11 @@ class MessageLog(commands.Cog):
                 channel_mentions.append(ch.mention)
         chans_value = ", ".join(channel_mentions) if channel_mentions else "None"
 
-        cat_names = []
-        for cat_id in data.get("ignored_categories", []):
-            cat = ctx.guild.get_channel(cat_id)
-            if isinstance(cat, discord.CategoryChannel):
-                cat_names.append(cat.name)
+        cat_names = [
+            cat.name
+            for cat_id in data.get("ignored_categories", [])
+            if isinstance((cat := ctx.guild.get_channel(cat_id)), discord.CategoryChannel)
+        ]
         cats_value = "\n".join(f"• {n}" for n in cat_names) if cat_names else "None"
 
         embed = discord.Embed(title="MessageLog Settings", color=discord.Color.blurple())
